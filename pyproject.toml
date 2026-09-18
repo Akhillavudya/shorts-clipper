@@ -47,6 +47,11 @@ packages = ["src/clipper"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# ruff formats Python blocks inside Markdown as of 0.16, which means
+# `ruff format .` rewrites the snippets in FULL_PLAN.md and WEB_UI_PLAN.md.
+# Those are design documents: their code is illustration, wrapped to sit in
+# prose, and not something the formatter should have an opinion about.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
