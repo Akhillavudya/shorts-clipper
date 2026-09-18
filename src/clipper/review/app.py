@@ -75,8 +75,22 @@ def create_app(
     store: JobStore | None = None,
     jobs_root: Path | str | None = None,
     weights: dict[str, Any] | None = None,
+    api: bool = True,
 ) -> Flask:
-    """Build the app. ``store`` wins over ``jobs_root``; tests pass a temp one."""
+    """Build the app. ``store`` wins over ``jobs_root``; tests pass a temp one.
+
+    ``api`` mounts the ``/api`` blueprint (WEB_UI_PLAN.md section 4) alongside
+    the Jinja pages. It is on by default and additive: the pages, the media
+    route and their tests are untouched by it. The switch exists so a test can
+    assert the Jinja UI stands up on its own.
+    """
+    # Imported here rather than at module scope, and it has to be: ``server/
+    # api.py`` reads this package's ``presenter``, so a top-level import would
+    # close the loop ``review -> server.api -> review``. Deferring it to call
+    # time breaks the cycle under every import order instead of relying on
+    # ``from package import submodule`` resolving a half-built module.
+    from clipper.server.api import create_blueprint, job_dir_or_404
+
     if store is None:
         store = JobStore(jobs_root if jobs_root is not None else DEFAULT_JOBS_ROOT)
 
@@ -91,12 +105,13 @@ def create_app(
         return app.config["JOB_STORE"]
 
     def _job_dir(job_id: str) -> Path:
-        """Resolve a job directory, refusing anything outside the jobs root."""
-        root = _store().root.resolve()
-        directory = (root / job_id).resolve()
-        if directory.parent != root or not _store().exists(job_id):
-            abort(404, description=f"no job {job_id!r} under {_store().root}")
-        return directory
+        """Resolve a job directory, refusing anything outside the jobs root.
+
+        The guard itself lives in ``server/api.py`` so the pages, the media
+        route and the API share one implementation: a traversal test written
+        against any of them now covers all of them.
+        """
+        return job_dir_or_404(_store(), job_id)
 
     # -- pages ----------------------------------------------------------
 
@@ -187,6 +202,14 @@ def create_app(
     @app.get("/healthz")
     def healthz():
         return jsonify({"ok": True, "jobs_root": str(_store().root)})
+
+    # -- the JSON API ----------------------------------------------------
+
+    # Registered after the pages and before the error handlers. Ordering is
+    # not load-bearing yet - no route below collides with ``/api/`` - but it
+    # will be once the SPA catch-all arrives, and that one must be last.
+    if api:
+        app.register_blueprint(create_blueprint())
 
     # -- errors ----------------------------------------------------------
 

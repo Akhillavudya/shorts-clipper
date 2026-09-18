@@ -35,10 +35,11 @@ from typing import Annotated
 import typer
 from dotenv import load_dotenv
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
-from clipper import config as config_module
 from clipper import media, pipeline
+from clipper.server import doctor as server_doctor
 from clipper.state import RightsBlocked, StageStatus, summarize
 
 app = typer.Typer(
@@ -823,124 +824,36 @@ def status(
 @app.command()
 def doctor(
     config: ConfigPath = Path("config/settings.yaml"),
+    jobs_root: JobsRoot = None,
 ) -> None:
     """Check that the things every stage assumes are actually present.
 
     Cheaper than discovering mid-run that ffmpeg is missing or a key is unset.
+
+    The checks themselves live in ``server/doctor.py`` and are plain data, so
+    ``GET /api/doctor`` serves the same list this prints (WEB_UI_PLAN.md
+    section 9). This function is only the rendering: adding a check there adds
+    it here for free, and the two can no longer drift.
     """
-    import importlib.util
-    import os
+    checks = server_doctor.diagnose(config_path=config, jobs_root=jobs_root)
 
-    ok = True
+    colours = {"ok": "green", "warn": "yellow", "fail": "red"}
+    for check in checks:
+        colour = colours[check.status]
+        # Every check's text is escaped before it is printed. Details carry
+        # Windows paths and ffmpeg errors, and a trailing backslash - `C:\` is
+        # the common one - escapes the closing tag, which then prints as
+        # literal `[/green]`. Escaping is also the only thing stopping a file
+        # on disk from injecting markup into this output.
+        detail = escape(check.detail)
+        console.print(f"  {check.name:<28} [{colour}]{detail}[/{colour}]")
+        if check.hint:
+            console.print(f"  {'':<28} [dim]{escape(check.hint)}[/dim]")
 
-    ffmpeg_ok = media.available()
-    ok &= ffmpeg_ok
-    ffmpeg_note = (
-        "[green]found[/green]"
-        if ffmpeg_ok
-        else "[red]missing[/red] - needed by every stage past ingest"
-    )
-    console.print(f"  {'ffmpeg + ffprobe':<28} {ffmpeg_note}")
-
-    try:
-        settings = config_module.Settings.load(config)
-        console.print(f"  {str(config):<28} [green]ok[/green]")
-    except Exception as exc:  # noqa: BLE001 - reported, not raised
-        console.print(f"  {config}       [red]{exc}[/red]")
-        raise typer.Exit(code=1) from exc
-
-    for name, block in (settings.section("providers") or {}).items():
-        env = block.get("api_key_env")
-        if not env:
-            continue
-        present = bool(os.environ.get(env))
-        console.print(
-            f"  {env:<28} {'[green]set[/green]' if present else '[yellow]unset[/yellow]'} ({name})"
-        )
-
-    # OAuth, not an API key: `upload` and `calibrate` are the two stages that
-    # act as the channel rather than reading public data, and both fail at the
-    # first call without these. Reported together because a refresh token is
-    # only usable alongside the client that minted it.
-    from clipper import google_auth
-
-    oauth = {
-        var: bool(os.environ.get(var))
-        for var in (
-            google_auth.CLIENT_ID_ENV,
-            google_auth.CLIENT_SECRET_ENV,
-            google_auth.REFRESH_TOKEN_ENV,
-        )
-    }
-    if all(oauth.values()) or os.environ.get(google_auth.TOKEN_ENV):
-        console.print(f"  {'youtube oauth':<28} [green]set[/green] (upload, calibrate)")
-    elif any(oauth.values()):
-        unset = ", ".join(var for var, present in oauth.items() if not present)
-        console.print(f"  {'youtube oauth':<28} [yellow]incomplete[/yellow] - unset: {unset}")
-    else:
-        console.print(
-            f"  {'youtube oauth':<28} [yellow]unset[/yellow] - run `clipper auth` "
-            f"before upload or calibrate"
-        )
-
-    for path in (
-        config_module.WATCHLIST_PATH,
-        config_module.CAPTION_STYLE_PATH,
-        config_module.SCORING_WEIGHTS_PATH,
-    ):
-        exists = Path(path).is_file()
-        ok &= exists
-        console.print(
-            f"  {str(path):<28} {'[green]ok[/green]' if exists else '[red]missing[/red]'}"
-        )
-
-    # Face tracking is optional by design: without it `render` centre-crops
-    # and records why. Reported here so that is a choice rather than a
-    # surprise noticed three Shorts later.
-    from clipper.edit import track
-
-    edit_cfg = settings.edit
-    if not track.tracking_enabled(edit_cfg):
-        console.print(f"  {'face tracking':<28} [dim]off (edit.reframe: centre)[/dim]")
-    else:
-        options = track.options_from_config(edit_cfg)
-        missing = [
-            name
-            for module, name in (("cv2", "opencv-python"), ("mediapipe", "mediapipe"))
-            if importlib.util.find_spec(module) is None
-        ]
-        if missing:
-            console.print(
-                f"  {'face tracking':<28} [yellow]{', '.join(missing)} not installed"
-                f"[/yellow] - renders will centre-crop"
-            )
-        elif not options.model_path.is_file():
-            console.print(
-                f"  {'face tracking':<28} [yellow]model missing[/yellow] at "
-                f"{options.model_path} - see assets/models/README.md"
-            )
-        else:
-            console.print(f"  {'face tracking':<28} [green]ready[/green]")
-
-    try:
-        from clipper.rights.registry import Watchlist
-
-        watchlist = Watchlist.load()
-        blocked = sum(1 for c in watchlist.channels if not c.is_exportable)
-        console.print(
-            f"  watchlist                    [green]{len(watchlist)} channels[/green] "
-            f"({blocked} blocked)"
-        )
-        if len(watchlist) == 0:
-            console.print(
-                "    [yellow]empty - every source will resolve to 'unknown' and "
-                "render will refuse it.[/yellow]"
-            )
-    except Exception as exc:  # noqa: BLE001 - reported, not raised
-        ok = False
-        console.print(f"  watchlist                    [red]{exc}[/red]")
-
-    raise typer.Exit(code=0 if ok else 1)
+    # A warning is information, not a failure: no face model means renders
+    # centre-crop, no OAuth means upload is unavailable. Only a `fail` means a
+    # stage will not run, and only that should break a script checking $?.
+    raise typer.Exit(code=1 if server_doctor.overall_status(checks) == "fail" else 0)
 
 
 def main() -> None:
