@@ -1,0 +1,58 @@
+# Caption style (FULL_PLAN.md section 7).
+#
+# Lives in config, not code, because this is the file you will iterate on most.
+# edit/captions.py reads these values and emits ASS; nothing here is duplicated
+# in Python.
+#
+# Colours are ASS format: &HAABBGGRR& - alpha, then BLUE, GREEN, RED. That byte
+# order is backwards from CSS hex and is the single most common mistake here.
+# &H00FFFFFF& is opaque white; alpha 00 = opaque, FF = transparent.
+
+font:
+  name: "Montserrat ExtraBold"   # must be installed locally; ffmpeg resolves by name
+  size: 78                       # at 1080x1920
+  bold: true
+  italic: false
+  spacing: 0.4                   # extra px between glyphs
+
+colours:
+  primary: "&H00FFFFFF&"         # base word colour (white)
+  highlight: "&H0000E5FF&"       # karaoke word currently being spoken (amber)
+  emphasis: "&H0000D7FF&"        # emphasis_words from the rerank pass (gold)
+  outline: "&H00000000&"         # black
+  shadow: "&H80000000&"          # 50% black
+
+outline:
+  width: 6                       # heavy, so text survives any background
+  shadow: 3
+  border_style: 1                # 1 = outline+shadow, 3 = opaque box
+
+layout:
+  words_per_line: 4              # Shorts convention is ~3-5
+  max_lines: 2
+  alignment: 2                   # ASS numpad: 2 = bottom-centre
+  # Lower third, but clear of the platform UI overlay. At 1920 tall the Shorts
+  # UI eats roughly the bottom 380px, so anything under ~420 gets covered.
+  margin_v: 460
+  margin_l: 80
+  margin_r: 80
+
+emphasis:
+  # Emphasis words get a colour override plus a size bump.
+  scale_percent: 112
+  enabled: true
+
+karaoke:
+  enabled: true
+  mode: "k"                      # k = instant fill, kf = sweep, ko = outline
+  # Words shorter than this get their reveal padded, otherwise fast speech
+  # produces a strobing effect.
+  min_word_ms: 90
+
+hook_overlay:
+  # hook_rewrite from the rerank pass, shown over the first seconds.
+  enabled: true
+  duration_s: 2.0
+  size: 92
+  margin_v: 1150                 # upper-middle, away from the captions
+  colour: "&H00FFFFFF&"

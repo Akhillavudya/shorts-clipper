@@ -1,0 +1,263 @@
+# Paths, model tiers, and thresholds.
+#
+# Pipeline code never names a concrete model. It asks the router for a logical
+# tier ("recall" or "rerank") and this file decides what that means. Swapping
+# provider is a config change, not a code change.
+
+paths:
+  jobs_root: jobs
+  assets_root: assets
+  music_dir: assets/music
+  # Caption fonts, handed to libass at burn-in. A font named in
+  # caption_style.yaml that is neither here nor installed is substituted
+  # silently - the encode succeeds and the style is applied to a typeface
+  # nobody picked - so the ones the style names belong in here.
+  fonts_dir: assets/fonts
+
+# ---------------------------------------------------------------------------
+# LLM tiers
+# ---------------------------------------------------------------------------
+# FULL_PLAN.md section 2 specified Claude Haiku 4.5 / Sonnet 5. We run on free
+# tiers instead, so the plan's model choices became config. The two tiers keep
+# the plan's shape: a cheap high-recall pass, then a stronger precision pass.
+#
+# Model IDs below were taken from ai.google.dev/gemini-api/docs/models and
+# console.groq.com/docs/models. Both are current stable IDs, not previews.
+
+tiers:
+  recall:
+    # Pass 1, moments/recall.py. High volume, whole transcript, recall task.
+    provider: gemini
+    model: gemini-3.5-flash-lite
+  rerank:
+    # Pass 2, moments/score.py. ~20 candidates, precision task.
+    #
+    # gemini-3.8-flash was the obvious pick and is unusable on this account:
+    # it answers a trivial prompt but returns 503 UNAVAILABLE ("high demand")
+    # on every real payload, and on the one attempt that did return it spent
+    # so much of the 8192-token budget thinking that the JSON came back
+    # truncated. flash-lite is what is actually serving - measured, not
+    # assumed - and is the same model the recall tier runs on. Move this back
+    # up when 3.8 stops 503ing; it is a strictly better reranker on paper.
+    provider: gemini
+    model: gemini-3.5-flash-lite
+
+fallback:
+  # Used when the primary provider keeps failing or is rate-limited out.
+  provider: groq
+  model: llama-3.3-70b-versatile
+
+providers:
+  gemini:
+    api_key_env: GEMINI_API_KEY
+    # TODO: confirm your actual free-tier limits and replace these.
+    #   https://aistudio.google.com/rate-limit
+    # Google no longer publishes per-model free-tier numbers in the docs; they
+    # are account-specific. These are deliberately conservative so the limiter
+    # self-throttles below the real ceiling rather than above it.
+    limits:
+      rpm: 10          # TODO verify
+      tpm: 250000      # TODO verify
+      rpd: 250         # TODO verify
+
+  groq:
+    api_key_env: GROQ_API_KEY
+    base_url: https://api.groq.com/openai/v1
+    # TODO: confirm at https://console.groq.com/settings/limits
+    limits:
+      rpm: 30          # TODO verify
+      tpm: 12000       # TODO verify
+      rpd: 1000        # TODO verify
+
+  ollama:
+    # Local, no quota. Stub until there is a GPU worth pointing it at.
+    base_url: http://localhost:11434
+    model: llama3.1:8b
+    limits:
+      rpm: 0           # 0 disables that limit
+      tpm: 0
+      rpd: 0
+
+llm:
+  # Retry / failover behaviour. See llm/router.py.
+  max_attempts: 4            # attempts against the primary before failing over
+  backoff_base_s: 1.0        # first retry waits ~this long
+  backoff_max_s: 60.0
+  backoff_jitter: 0.3        # +/- fraction, so parallel jobs do not sync up
+  timeout_s: 120
+  failover_enabled: true
+  cache_enabled: true        # jobs/<id>/.llm_cache/ - reruns must not respend quota
+  log_calls: true            # jobs/<id>/llm.log
+
+# ---------------------------------------------------------------------------
+# Pipeline thresholds
+# ---------------------------------------------------------------------------
+
+discovery:
+  # section 3: 10,000 units/day per project. Watchlist scanning costs ~1 unit
+  # per channel, so this ceiling should never be reached. It exists to catch a
+  # bug that starts calling search.list in a loop.
+  #
+  # The ledger that enforces it is persisted under jobs/.discover/quota.json and
+  # keyed on the UTC date, so a second scan on the same day does not start from
+  # zero. Set to 0 to disable the check entirely.
+  daily_quota_ceiling: 2000
+  max_candidates: 15          # how many reach the one LLM call
+  min_video_age_hours: 6      # velocity is meaningless before this
+  min_channel_uploads: 5      # before the channel median is trustworthy
+  per_channel: 5              # recent uploads checked per channel per scan
+  region_code: US             # for videos.list?chart=mostPopular
+
+publish:
+  # Metadata for a finished clip (publish/metadata.py). `clipper publish`
+  # writes clips/clip_NN/upload.json with the title, description and credit;
+  # `clipper upload` sends it with final.mp4.
+  #
+  # Uploads start private on purpose. An automated pipeline that publishes
+  # straight to public removes the last place a bad clip can be caught, and
+  # flipping a good one to public by hand is one click.
+  privacy_status: private
+  category_id: "22"           # People & Blogs. Set your niche's id here.
+  add_shorts_tag: true        # append #Shorts to the title when it fits
+  made_for_kids: false
+  # Appended to every description, before the disclaimer. Your own channel
+  # link, a Patreon, whatever. Leave null for none.
+  extra_text: null
+
+  upload:
+    # videos.insert (publish/upload.py). Needs OAuth, not an API key - run
+    # `clipper auth` once to mint the refresh token.
+    #
+    # One upload costs 1600 of the project's 10,000 Data API units/day, and
+    # that is the SAME budget discovery spends one unit at a time. Both charge
+    # jobs/.discover/quota.json. This ceiling is the upload-side guard on the
+    # shared total: 8000 leaves room for four uploads plus a day of scanning,
+    # and discovery keeps its own much tighter ceiling above. Set to 0 to
+    # disable the check.
+    daily_quota_ceiling: 8000
+    quota_cost: 1600          # the documented cost; here so it can be corrected
+    chunk_mb: 8               # rounded down to a multiple of 256 KiB
+    max_attempts: 5           # per chunk, with exponential backoff
+    timeout_s: 300
+
+transcription:
+  backend: gemini             # gemini | whisperx
+  sample_rate: 16000
+  channels: 1
+
+  gemini:
+    # Audio understanding is not a router tier - the router is text-only - so
+    # this model id lives here rather than under `tiers`. Measured against a
+    # real 5-minute window of a Hinglish podcast on 2026-09-13:
+    #   gemini-3.8-flash       503 UNAVAILABLE, every attempt, for long audio
+    #                          (it serves a 10-second clip fine - the failure is
+    #                          length-dependent, not a bad model id)
+    #   gemini-2.5-flash       243s, then MAX_TOKENS at 65,449 output tokens -
+    #                          a *truncated* transcript, caught now by the
+    #                          finish_reason guard in transcribe/gemini.py
+    #   gemini-3.5-flash-lite  65s, complete, diarized
+    model: gemini-3.5-flash-lite
+    api_key_env: GEMINI_API_KEY
+    # Audio is transcribed in windows. Bounds how much JSON a single call has
+    # to emit: a 2-hour episode in one response overruns max_output_tokens and
+    # comes back truncated, which reads as a mangled transcript rather than an
+    # error.
+    # 1 minute, not 10. These are model-reported timings, not forced
+    # alignment, and the error is not a constant offset - it accumulates
+    # *within* a window. Measured against ground truth on a 5-minute window:
+    # +1.4s at 28s, +15s at 150s, +57s at 238s. Since each window is timed from
+    # its own zero, short windows bound the damage: at 60s the drift stays
+    # inside a couple of seconds, which snap.py's silence snapping absorbs.
+    # The cost is one call per minute of audio and speaker labels that are only
+    # consistent within a window. The real fix is forced alignment (whisperx),
+    # which needs a GPU this machine does not have.
+    chunk_minutes: 1
+    # 5, not 3: a free-tier 503 ("this model is experiencing high demand") is
+    # the common failure here, and it clears on its own. Backoff is 2^attempt
+    # capped at 30s, so 3 attempts gave up after ~6 seconds of waiting.
+    max_attempts: 5
+    timeout_s: 600            # a 10-minute window is a slow call
+
+  whisperx:
+    # Local backend. Not a declared dependency - install it yourself once
+    # there is a GPU worth pointing at it.
+    model: large-v3
+    device: auto              # auto | cuda | cpu
+    compute_type: float16     # int8 on CPU
+    batch_size: 16
+    diarize: true
+    hf_token_env: HF_TOKEN    # pyannote diarization needs an accepted licence
+
+moments:
+  chunk_minutes: 10
+  chunk_overlap_s: 60
+  target_candidates: 40       # across a 2-hour episode
+  rerank_top_n: 20
+  # Boundary snapping (section 5). Deterministic, never model-decided.
+  silence_threshold_db: -30
+  min_silence_ms: 250
+  pad_ms: 150
+  clip_length_s:
+    min: 25
+    target: 40
+    max: 55
+
+ingest:
+  # Ceiling on the downloaded format. The floor is 1080p (below that the 9:16
+  # crop is visibly soft); without a ceiling a 4K upload is a ~1 GB download
+  # per episode to produce a 40-second Short. 1440 crops to 810x1440, a 1.33x
+  # upscale; 2160 is the only height that never upscales, at twice the bytes.
+  # null for no ceiling.
+  max_source_height: 1440
+
+edit:
+  width: 1080
+  height: 1920
+  fps: 30
+  crf: 19
+  preset: slow
+  audio_bitrate: 192k
+  loudness_lufs: -14.0        # YouTube's target
+
+  # --- 9:16 reframing -----------------------------------------------------
+  # `track` follows the active speaker; `centre` is a static centre crop.
+  # `clipper render --centre-crop` forces centre for one render. Tracking
+  # degrades to centre rather than failing - a missing model, an unreadable
+  # file, or too few frames with a face in them all fall back, and the reason
+  # lands on the clip's reframe stage as `track_note`.
+  reframe: track
+  # BlazeFace, from MediaPipe's model zoo. Not in the repo by default; see
+  # assets/models/README.md for the one-line fetch. The full-range model is
+  # the right default for podcast framing - short-range is tuned for a face
+  # within ~2m of the lens and misses a wide two-shot outright (measured:
+  # 0.4-0.5 confidence with dropouts, against 0.84-0.95 with no dropouts).
+  face_model: assets/models/blaze_face_full_range.tflite
+  face_min_confidence: 0.5
+  detect_interval_s: 0.25     # face detection sampling
+  smoothing_alpha: 0.15       # EMA on the crop path; lower = smoother, laggier
+  deadzone_px: 40             # ignore movement under this, or the frame jitters
+  scene_threshold: 27.0       # PySceneDetect content detector; lower = more cuts
+  # Below this fraction of sampled frames containing a face, the path is noise
+  # and the render centre-crops instead. A lecture slide deck with one talking
+  # head in the corner is the case this catches.
+  min_face_coverage: 0.35
+  # Music bed. Off by default: for dense talking-head content music usually
+  # hurts. `clipper render --music <track>` turns it on for one render without
+  # touching this, and --no-music turns it off when this says true.
+  music_enabled: false
+  music_track:                # a filename in assets/music, or blank for the
+                              # first one in sorted order
+  music_bed_lufs: -26         # the bed's own loudness target, not a gain: the
+                              # track is normalized to this, so swapping tracks
+                              # does not change the mix. 12 LU under the speech.
+  music_duck: true            # sidechaincompress, keyed on the speech - the bed
+                              # drops out from under a sentence and swells back
+                              # into the gap. false = flat bed.
+  music_fade_in_s: 0.75
+  music_fade_out_s: 1.5
+
+rights:
+  # section 0: the gate refuses these unless an explicit override is passed.
+  # "unknown" is blocked with "red" on purpose - unclassified is not cleared.
+  exportable: [green, amber]
+  require_override_for: [red, unknown]

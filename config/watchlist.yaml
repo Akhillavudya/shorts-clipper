@@ -1,0 +1,91 @@
+# Channel watchlist (FULL_PLAN.md sections 0 and 3).
+#
+# This file is the highest-leverage asset in the project. It is maintained by
+# hand, and it is what the rights gate reads.
+#
+# Every entry needs a rights_status. The gate blocks "red" and "unknown" at
+# render time, because reused-content enforcement is applied at the CHANNEL
+# level: one bad batch suspends monetization for everything, not one video.
+#
+#   green  - your own footage; a public clipping policy; written permission;
+#            YouTube CC-BY licence; US federal works; public domain.
+#   amber  - a creator who said yes by email. Save the thread under
+#            src/clipper/rights/permissions/<channel_id>.md and reference it.
+#   red    - creators who already run official clip channels. Keep these off a
+#            monetized channel entirely, or on a channel you can afford to lose.
+#
+# Licence traps - these look open and are not:
+#   MIT OpenCourseWare, Khan Academy  CC BY-NC-SA  no commercial use
+#   TED                               CC BY-NC-ND  no derivatives at all
+# A monetized channel is commercial, and a clip is a derivative. On YouTube,
+# filter for "Creative Commons - Attribution (CC BY)" specifically.
+#
+# Target 30-80 channels. Start with tier A from section 13: CC BY, public
+# domain, and permissioned creators only.
+
+defaults:
+  max_per_day: 2          # videos pulled from any one channel per scan
+  min_duration_s: 900     # skip anything under 15 min; a 40s clip out of a
+                          # 4-minute video is a much weaker position than 40s
+                          # out of a 2-hour episode
+
+# Optional per-entry keys, both read by stages rather than by the gate:
+#
+#   podcast_feed_id   Podcast Index feed id. When present, `clipper discover`
+#                     also checks the RSS side, which often has the episode
+#                     before the YouTube upload appears. Needs
+#                     PODCAST_INDEX_KEY / _SECRET in .env; skipped silently
+#                     without them.
+#   credit_handle     The exact handle a creator asked to be credited by. If
+#                     permission was granted on that condition, the condition
+#                     is part of the permission - publish/metadata.py puts it
+#                     in the description verbatim.
+
+channels: []
+
+# ---------------------------------------------------------------------------
+# Examples. Delete these and add real entries.
+# ---------------------------------------------------------------------------
+#
+# channels:
+#   # -- green: your own footage -------------------------------------------
+#   - id: UC00000000000000000000
+#     name: My own long-form channel
+#     rights_status: green
+#     note: Own footage. No permission needed.
+#     topics: [interviews]
+#
+#   # -- green: public clipping policy --------------------------------------
+#   - id: UC11111111111111111111
+#     name: Example Creator
+#     rights_status: green
+#     note: Public clipping policy allows Shorts with credit + episode link.
+#     source: https://example.com/clipping-policy
+#     checked: 2026-09-07
+#     topics: [startups, engineering]
+#
+#   # -- green: CC BY licensed ----------------------------------------------
+#   - id: UC22222222222222222222
+#     name: Example CC-BY Channel
+#     rights_status: green
+#     note: Uploads under Creative Commons - Attribution. Verify per video;
+#           the channel default is not a guarantee for any single upload.
+#     licence: cc-by
+#     topics: [science]
+#
+#   # -- amber: permission by email -----------------------------------------
+#   - id: UC33333333333333333333
+#     name: Mid-tier Creator
+#     rights_status: amber
+#     note: Said yes by email 2026-08-14. Asked for @handle credit on screen.
+#     permission_file: rights/permissions/UC33333333333333333333.md
+#     topics: [fitness]
+#
+#   # -- red: do not clip ----------------------------------------------------
+#   - id: UC44444444444444444444
+#     name: Large Podcast
+#     rights_status: red
+#     note: Runs its own official clips channel. Canonical reused-content
+#           pattern - kept here so the gate blocks it rather than it being
+#           re-added by mistake later.
+#     topics: [podcast]

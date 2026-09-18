@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Jobs &middot; clipper review{% endblock %}
+
+{% block headline %}
+  <h1>Jobs</h1>
+  <p class="lede">
+    {{ jobs|length }} job{{ '' if jobs|length == 1 else 's' }} under
+    <code>{{ jobs_root }}</code>, most recently touched first.
+  </p>
+{% endblock %}
+
+{% block content %}
+{% if not jobs %}
+  <p class="empty">
+    Nothing to review yet. Start one with
+    <code>clipper ingest &lt;url&gt;</code>, then
+    <code>clipper transcribe</code> and <code>clipper moments</code>.
+  </p>
+{% else %}
+<div class="table-wrap">
+<table class="jobs">
+  <caption class="visually-hidden">Jobs, with rights status and review progress</caption>
+  <thead>
+    <tr>
+      <th scope="col">Job</th>
+      <th scope="col">Rights</th>
+      <th scope="col">Next stage</th>
+      <th scope="col" class="num">Clips</th>
+      <th scope="col">Review</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for job in jobs %}
+    <tr>
+      <th scope="row">
+        <a href="{{ url_for('job', job_id=job.video_id) }}">{{ job.title }}</a>
+        <span class="sub">{{ job.video_id }}{% if job.channel_title %} &middot; {{ job.channel_title }}{% endif %}</span>
+      </th>
+      <td>
+        <span class="badge badge--{{ job.rights_status }}">{{ job.rights_status }}</span>
+        {%- if job.rights_override %} <span class="badge badge--override">override</span>{% endif %}
+      </td>
+      <td>
+        {% if job.stage_failed %}
+          <span class="stage stage--failed">{{ job.stage }} failed</span>
+        {% else %}
+          <span class="stage">{{ job.stage }}</span>
+        {% endif %}
+      </td>
+      <td class="num">{{ job.counts.total }}</td>
+      <td>
+        {% if job.counts.total %}
+          <span class="tally">
+            <span class="tally__approved">{{ job.counts.approved }} kept</span>
+            <span class="tally__rejected">{{ job.counts.rejected }} cut</span>
+            <span class="tally__pending">{{ job.counts.pending }} to do</span>
+          </span>
+        {% else %}
+          <span class="sub">no candidates</span>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

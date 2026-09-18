@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block title %}{{ job.title }} &middot; clipper review{% endblock %}
+
+{% block headline %}
+  <h1>{{ job.title }}</h1>
+  <p class="lede">
+    <code>{{ job.video_id }}</code>
+    {%- if job.channel_title %} &middot; {{ job.channel_title }}{% endif %}
+    {%- if job.duration_s %} &middot; {{ job.duration_label }}{% endif %}
+    &middot; <span class="badge badge--{{ job.rights_status }}">{{ job.rights_status }}</span>
+    {%- if job.rights_override %} <span class="badge badge--override">override</span>{% endif %}
+    {%- if job.source_url %} &middot; <a href="{{ job.source_url }}" rel="noreferrer noopener" target="_blank">source</a>{% endif %}
+  </p>
+  <p class="tally tally--head" id="tally" aria-live="polite" aria-atomic="true">
+    <span class="tally__approved" data-count="approved">{{ job.counts.approved }} kept</span>
+    <span class="tally__rejected" data-count="rejected">{{ job.counts.rejected }} cut</span>
+    <span class="tally__pending" data-count="pending">{{ job.counts.pending }} to do</span>
+  </p>
+{% endblock %}
+
+{% block content %}
+
+{% for warning in job.warnings %}
+  <p class="notice" role="note">{{ warning }}</p>
+{% endfor %}
+
+{% if job.rights_note %}
+  <details class="rights">
+    <summary>Why this job is {{ job.rights_status }}</summary>
+    <p>{{ job.rights_note }}</p>
+  </details>
+{% endif %}
+
+{% if job.clips %}
+<p class="hint">
+  Keyboard: <kbd>j</kbd>/<kbd>k</kbd> move, <kbd>a</kbd> keep, <kbd>r</kbd> cut,
+  <kbd>u</kbd> undo, <kbd>space</kbd> play. Notes save when you leave the box.
+</p>
+{% endif %}
+
+<ol class="clips">
+{% for clip in job.clips %}
+  <li>
+  <article class="card card--{{ clip.verdict }}"
+           id="{{ clip.clip_id }}"
+           tabindex="-1"
+           data-clip-id="{{ clip.clip_id }}"
+           data-verdict="{{ clip.verdict }}"
+           aria-labelledby="{{ clip.clip_id }}-title">
+
+    <header class="card__head">
+      <h2 id="{{ clip.clip_id }}-title">
+        <span class="card__index">#{{ clip.index }}</span>
+        {{ clip.suggested_title or clip.reason or clip.clip_id }}
+      </h2>
+      <p class="card__meta">
+        <span class="score" title="weighted total">{{ clip.score_label }}</span>
+        <span>{{ clip.duration_label }}</span>
+        <span>{{ clip.span_label }}</span>
+        {% if clip.type %}<span>{{ clip.type }}</span>{% endif %}
+        {% if clip.rendered %}<span class="flag">rendered</span>{% endif %}
+        {% if clip.youtube_video_id %}<span class="flag">published</span>{% endif %}
+      </p>
+      <p class="card__verdict" data-verdict-label>{{ clip.verdict }}</p>
+    </header>
+
+    <div class="card__body">
+      <div class="preview">
+        {% if clip.preview %}
+          <div class="preview__frame"
+               data-src="{{ url_for('media', job_id=job.video_id, relpath=clip.preview.path) }}"
+               data-start="{{ '%.3f'|format(clip.preview.start) }}"
+               data-end="{{ '%.3f'|format(clip.preview.end) }}"
+               data-source="{{ '1' if clip.preview.is_source else '0' }}">
+            <button type="button" class="preview__play" data-play>
+              <span aria-hidden="true">&#9654;</span>
+              Play {{ clip.duration_label }}
+            </button>
+            <noscript>
+              <video controls preload="none"
+                     src="{{ url_for('media', job_id=job.video_id, relpath=clip.preview.path) }}#t={{ '%.3f'|format(clip.preview.start) }},{{ '%.3f'|format(clip.preview.end) }}">
+              </video>
+            </noscript>
+          </div>
+          <p class="preview__label">{{ clip.preview.label }}</p>
+        {% else %}
+          <p class="preview__label preview__label--missing">
+            No media on disk to preview. The source is downloaded by
+            <code>clipper ingest</code>.
+          </p>
+        {% endif %}
+        {% if clip.source_link %}
+          <p class="preview__label">
+            <a href="{{ clip.source_link }}" rel="noreferrer noopener" target="_blank">
+              open the original at {{ clip.span_label.split(' - ')[0] }}
+            </a>
+          </p>
+        {% endif %}
+      </div>
+
+      <div class="detail">
+        {% if clip.transcript %}
+          <blockquote class="transcript">{{ clip.transcript }}</blockquote>
+        {% elif clip.reason %}
+          <p class="transcript transcript--fallback">{{ clip.reason }}</p>
+        {% endif %}
+
+        {% if clip.hook_rewrite %}
+          <p class="kv"><span class="kv__key">hook</span> {{ clip.hook_rewrite }}</p>
+        {% endif %}
+        {% if clip.emphasis_words %}
+          <p class="kv">
+            <span class="kv__key">emphasis</span>
+            {% for word in clip.emphasis_words %}<span class="chip">{{ word }}</span>{% endfor %}
+          </p>
+        {% endif %}
+        {% if clip.render_note %}
+          <p class="kv"><span class="kv__key">reframe</span> {{ clip.render_note }}</p>
+        {% endif %}
+
+        {% if clip.rubric %}
+        <table class="rubric">
+          <caption class="visually-hidden">Rubric scores out of 10 for {{ clip.clip_id }}</caption>
+          <tbody>
+          {% for axis in clip.rubric %}
+            <tr>
+              <th scope="row">
+                {{ axis.label }}
+                {% if axis.weight is not none %}<span class="rubric__weight">&times;{{ '%.2f'|format(axis.weight) }}</span>{% endif %}
+              </th>
+              <td class="rubric__bar">
+                <span class="bar"><span class="bar__fill" style="width: {{ '%.1f'|format(axis.percent) }}%"></span></span>
+              </td>
+              <td class="rubric__score">{{ '%.0f'|format(axis.score) }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </div>
+    </div>
+
+    <form class="card__actions"
+          method="post"
+          action="{{ url_for('review', job_id=job.video_id, clip_id=clip.clip_id) }}"
+          data-review-form>
+      <label class="visually-hidden" for="{{ clip.clip_id }}-note">
+        Why this clip was kept or cut
+      </label>
+      <textarea id="{{ clip.clip_id }}-note"
+                name="note"
+                rows="2"
+                data-note
+                placeholder="Why? Rejections are the training data.">{{ clip.review_note }}</textarea>
+      <div class="card__buttons">
+        <button type="submit" name="verdict" value="approve" data-verdict="approve"
+                class="btn btn--approve"
+                aria-pressed="{{ 'true' if clip.approved is true else 'false' }}">Keep</button>
+        <button type="submit" name="verdict" value="reject" data-verdict="reject"
+                class="btn btn--reject"
+                aria-pressed="{{ 'true' if clip.approved is false else 'false' }}">Cut</button>
+        <button type="submit" name="verdict" value="reset" data-verdict="reset"
+                class="btn btn--reset">Undecide</button>
+        <span class="saved" data-saved role="status"></span>
+      </div>
+    </form>
+  </article>
+  </li>
+{% endfor %}
+</ol>
+
+{% if job.counts.approved %}
+<p class="hint">
+  Then: <code>clipper render {{ job.video_id }} --approved-only</code>
+</p>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='review.js') }}" defer></script>
+{% endblock %}

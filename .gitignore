@@ -1,0 +1,32 @@
+# Job working directories: source video, audio, transcripts, renders, LLM cache.
+# Large, regenerable, and full of third-party footage. Never commit.
+jobs/
+
+# Secrets: GEMINI_API_KEY, GROQ_API_KEY, YouTube OAuth client secrets.
+.env
+*.env
+!.env.example
+
+# Downloaded YouTube Audio Library tracks. Licensed to you, not redistributable.
+assets/music/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+
+# Build artefacts, but NOT the SPA bundle: src/clipper/webui/dist/ is committed
+# on purpose so `clipper ui` needs Python only and never Node (WEB_UI_PLAN.md
+# section 6). Anchored to the root so it cannot swallow it.
+/dist/
+.pytest_cache/
+.ruff_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

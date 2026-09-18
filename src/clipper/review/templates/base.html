@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{% block title %}clipper review{% endblock %}</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#9986;</text></svg>">
+<link rel="stylesheet" href="{{ url_for('static', filename='review.css') }}">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-head">
+  <nav aria-label="Primary">
+    <a class="brand" href="{{ url_for('index') }}">clipper <span>review</span></a>
+  </nav>
+  {% block headline %}{% endblock %}
+</header>
+
+<main id="main">
+  {% block content %}{% endblock %}
+</main>
+
+<footer class="site-foot">
+  <p>
+    Local review UI. Approving a clip writes <code>approved</code> to
+    <code>state.json</code>; nothing here renders or uploads.
+  </p>
+</footer>
+
+{% block scripts %}{% endblock %}
+</body>
+</html>
