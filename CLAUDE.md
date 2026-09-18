@@ -15,10 +15,23 @@ framework, and none is wanted.
 ```bash
 uv sync                          # create/refresh .venv from pyproject.toml
 uv run clipper --help            # the CLI
-uv run pytest                    # tests (no network, no API keys needed)
+uv run python -m pytest          # tests (no network, no API keys needed)
 uv run ruff check . --fix        # lint
 uv run ruff format .             # format
 ```
+
+**`uv run pytest` does not work on this machine** - it fails with
+`uv trampoline failed to canonicalize script path`, or hangs after a
+reinstall. It is the `pytest.exe` console-script shim specifically:
+`uv run clipper` and `uv run python -m pytest` both work, and so does
+`.venv/Scripts/python.exe -m pytest`. Use `python -m` and move on; the shim
+is not worth debugging.
+
+`ruff format` is scoped to Python by `extend-exclude = ["*.md"]` in
+`pyproject.toml`. ruff 0.16 formats code blocks inside Markdown, and the
+snippets in `FULL_PLAN.md` and `WEB_UI_PLAN.md` are illustration wrapped to
+sit in prose. Do not remove that exclusion to "fix" a formatting diff on a
+design document.
 
 Requires Python 3.11+. `ffmpeg` must be on PATH for any stage past `ingest`.
 It is installed at `%LOCALAPPDATA%\Programs\ffmpeg\bin` (Gyan full build
@@ -209,17 +222,42 @@ for `amber` entries goes in `src/clipper/rights/permissions/`.
 
 ## Current status
 
-**Every phase of the build order is implemented.** `ingest -> transcribe ->
+**Every phase of the CLI build order is implemented.** `ingest -> transcribe ->
 moments -> render` runs end to end from the CLI, and so do `discover`,
-`review`, `publish`, `upload` and `calibrate`. 619 tests, none of which touch a
+`review`, `publish`, `upload` and `calibrate`. 692 tests, none of which touch a
 network or need ffmpeg.
 
 Implemented and tested: `state.py`, `llm/`, `media.py`, `config.py`,
 `prompts.py`, `pipeline.py`, `google_auth.py`, `ingest/`, `transcribe/`,
 `moments/`, `edit/`, `discover/`, `review/`, `publish/`, `calibrate/`,
-`rights/registry.py`, and the CLI (`discover`, `ingest`, `transcribe`,
-`moments`, `render`, `run`, `review`, `publish`, `upload`, `auth`,
-`calibrate`, plus `status` and `doctor`).
+`rights/registry.py`, `server/` (phase 0 only - see below), and the CLI
+(`discover`, `ingest`, `transcribe`, `moments`, `render`, `run`, `review`,
+`publish`, `upload`, `auth`, `calibrate`, plus `status` and `doctor`).
+
+**The web UI is in progress.** `WEB_UI_PLAN.md` is its design document and
+delivery order; phase 0 of that plan is done and committed. What exists:
+`src/clipper/server/` with the `/api` blueprint (`GET /api/jobs`,
+`/api/jobs/<id>`, `/api/doctor`), the hand-written serializers in
+`schemas.py`, the preflight checks as data in `doctor.py`, and ANSI
+stripping in `text.py`. `clipper review` serves it alongside the Jinja
+pages; `create_app(api=False)` turns it off. Phases 1-8 - the durable
+queue, the job runner and its worker subprocess, the React SPA, the rights
+panel and the retirement of the Jinja UI - are not built.
+
+Two rules the server layer keeps, both load-bearing and both with tests:
+
+- **`server/__init__` re-exports only the Flask-free half.** `cli.py` imports
+  `server.doctor`, and `clipper moments` must not pay to import a web
+  framework. Import `server.api` and `server.schemas` explicitly.
+- **`create_app` imports the blueprint lazily.** `server/api.py` reads
+  `review/presenter.py`, so a top-level import would close the loop
+  `review -> server.api -> review`.
+
+`server/doctor.py` is the one source of truth for the preflight checks:
+`clipper doctor` renders the list and `GET /api/doctor` serializes it.
+Add a check there and both gain it. Every key check reports *presence*
+only, never a value - there is a test asserting no environment value
+reaches the response.
 
 Eight things worth knowing about the newer stages:
 
