@@ -27,6 +27,8 @@ import pytest
 
 from clipper.review import presenter
 from clipper.server import schemas
+from clipper.server.events import Event
+from clipper.server.queue import QueueEntry, QueueStatus, RunOptions
 
 
 @pytest.fixture
@@ -323,3 +325,110 @@ def test_stage_json_reports_a_stage_that_never_ran():
     assert payload["status"] == "pending"
     assert payload["started_at"] is None
     assert payload["error"] is None
+
+
+# -- the queue (phase 1) ----------------------------------------------------
+
+
+def test_queue_entry_json_key_set_is_the_contract():
+    entry = QueueEntry(
+        source="https://www.youtube.com/watch?v=aaa",
+        options=RunOptions(rights="green", music="lofi.wav"),
+    )
+    payload = schemas.queue_entry_json(entry)
+
+    assert set(payload) == {
+        "entry_id",
+        "source",
+        "status",
+        "label",
+        "options",
+        "video_id",
+        "rights_status",
+        "pid",
+        "submitted_at",
+        "started_at",
+        "finished_at",
+        "last_alive",
+        "error",
+        "exit_code",
+    }
+    assert set(payload["options"]) == {
+        "rights",
+        "music",
+        "no_music",
+        "centre_crop",
+        "force",
+        "render_only",
+        "approved_only",
+        "clip_index",
+        "allow_red",
+        "override_reason",
+    }
+
+
+def test_queue_entry_json_emits_the_status_as_a_string():
+    """``StrEnum`` serialises anyway; asserting it keeps the SPA's union honest."""
+    entry = QueueEntry(source="a", status=QueueStatus.blocked)
+    payload = schemas.queue_entry_json(entry)
+
+    assert payload["status"] == "blocked"
+    assert isinstance(payload["status"], str)
+
+
+def test_queue_entry_json_labels_a_row_that_has_no_video_id_yet():
+    unresolved = schemas.queue_entry_json(QueueEntry(source="https://example.test/a"))
+    resolved = schemas.queue_entry_json(QueueEntry(source="https://example.test/a", video_id="aaa"))
+
+    assert unresolved["label"] == "https://example.test/a"
+    assert resolved["label"] == "aaa"
+
+
+def test_queue_entry_json_cleans_a_surfaced_error():
+    entry = QueueEntry(source="a", error="\x1b[31mffmpeg: Invalid data found\x1b[0m")
+
+    assert schemas.queue_entry_json(entry)["error"] == "ffmpeg: Invalid data found"
+
+
+def test_queue_entry_json_survives_json_dumps():
+    entry = QueueEntry(
+        source="a",
+        status=QueueStatus.running,
+        started_at=datetime(2026, 9, 17, 14, 3, tzinfo=UTC),
+        last_alive=datetime(2026, 9, 17, 14, 5, tzinfo=UTC),
+    )
+    payload = schemas.queue_entry_json(entry)
+
+    json.dumps(payload)
+    assert payload["started_at"] == "2026-09-17T14:03:00+00:00"
+
+
+def test_every_queue_field_reaches_the_wire():
+    """The forgotten-field regression, for the models rather than the dataclasses."""
+    payload = schemas.queue_entry_json(QueueEntry(source="a"))
+    missing = [name for name in QueueEntry.model_fields if name not in payload]
+    assert not missing, f"QueueEntry fields absent from its JSON: {missing}"
+
+    options = schemas.run_options_json(RunOptions())
+    missing = [name for name in RunOptions.model_fields if name not in options]
+    assert not missing, f"RunOptions fields absent from its JSON: {missing}"
+
+
+def test_event_json_is_the_stored_shape():
+    event = Event(
+        seq=12,
+        ts=datetime(2026, 9, 17, 14, 3, 11, tzinfo=UTC),
+        kind="progress",
+        stage="clip_01/reframe",
+        detail="tracked crop to 1080x1920",
+    )
+    payload = schemas.event_json(event)
+
+    assert payload == {
+        "seq": 12,
+        "ts": "2026-09-17T14:03:11+00:00",
+        "kind": "progress",
+        "stage": "clip_01/reframe",
+        "detail": "tracked crop to 1080x1920",
+    }
+    json.dumps(payload)

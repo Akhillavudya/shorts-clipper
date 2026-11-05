@@ -13,6 +13,28 @@ uv run clipper --help
 
 ## Pipeline
 
+The local web UI handles queueing, reviewing, previews and downloads:
+
+```bash
+uv run clipper ui
+```
+
+Open **Jobs** to review clips with keep/cut/undo and notes, preview the source
+span or finished render, and download one MP4 or all finished clips as a ZIP.
+Keyboard: `j`/`k` navigate, `a` keep, `r` cut, `u` undo, space play/pause.
+Review controls unlock when the job finishes. Web UI phases 0-6 are implemented.
+On a blocked job, classify the source with a reason and optionally remember its
+channel; clearing it requeues the job from its completed ingest. The job page
+also offers retry from a stage, render kept clips, render all except cut, and
+render one clip. Render anyway requires an explicit confirmation and reason.
+Open **Settings & storage** for system checks, disk usage, and source cleanup.
+Deleting a downloaded source keeps clips and review data; retry the pipeline
+to restore it before rendering again. Job pages link to worker logs.
+Operational logs rotate under `jobs/_queue/logs/`. The default free-space floor
+is 10 GB (`server.min_free_gb`). Only one queue server may run per jobs root;
+non-local UI binding requires `--allow-remote`.
+See `WEB_UI_PLAN.md` for the remaining optional progress and UI retirement work.
+
 ```
 discover -> ingest -> transcribe -> moments -> render -> publish -> calibrate
 ```

@@ -1,5 +1,40 @@
 # WEB_UI_PLAN.md
 
+## Implementation checkpoint — 2026-09-20
+
+Phases **0-6 are implemented**. Phase 4 adds the React jobs list and job detail,
+lazy clip previews with source-span seeking, rubric bars, keep/cut/undo and
+review notes, keyboard shortcuts, and individual MP4 / streamed ZIP downloads.
+Queue rows now open the React job page. The Python package's built bundle is
+updated alongside the frontend source. The legacy review UI remains for phase 8.
+
+The dashboard styling pass is complete: responsive sidebar navigation, white
+and near-black themes with Light / Dark / Auto controls, queue summary cards,
+a clearer creation form, searchable and filterable clip library, and consistent
+review cards. Theme preference is applied before first paint. Frontend build
+(including TypeScript compilation) and ESLint pass; the packaged bundle is rebuilt.
+
+**Phase 5 complete:** rights classification with required reasons, conservative
+watchlist appends, blocked-job resume, confirmed overrides, stage retry, and
+render-only controls for kept/all/individual clips. In-process queue locking
+serializes worker startup with API mutations; no cross-process lock is used.
+Completed ingest is reused on retries without resolving the source again.
+
+**Phase 6 implemented:** Settings & storage page, read-only operational config,
+per-job disk accounting and source deletion, bounded raw-log tails, rotating JSON
+server logs, configurable disk floor, queue ownership via an OS-held runner.lock,
+port-conflict errors and explicit remote-bind acknowledgement. Startup binds before
+workers begin; shutdown marks work interrupted and restart can stop surviving workers
+under the exclusive claim. Deletion resets ingest and preserves local originals,
+clips and scored.json. Retry restores deleted downloaded sources before render.
+
+**Next: phase 7 (optional download progress), then phase 8 (Jinja retirement).**
+All 934 Python tests, Ruff, frontend build and ESLint pass; real mid-render shutdown/restart and browser interaction
+verification remain manual.
+Browser interaction verification still needs a manual pass; the implementation
+session had no connected browser. Automated API, media and build checks are
+recorded in `CLAUDE.md`.
+
 The implementation plan for the local web frontend. `FULL_PLAN.md` is the
 research document for the pipeline; this is the same kind of document for the
 UI that drives it. Written 2026-09-17, to be implemented from the next session.

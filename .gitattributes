@@ -1,0 +1,15 @@
+# The built SPA (WEB_UI_PLAN.md section 6).
+#
+# `src/clipper/webui/dist/` is committed on purpose: `clipper ui` must work
+# after `uv sync` alone, and requiring Node to *run* a Python CLI is a real
+# regression in setup cost. The price is a generated bundle in the history,
+# and these two attributes are what keep that price down.
+#
+# -diff       : never print the minified bundle in a diff or a `git show`.
+# linguist-generated=true : collapse it in review UIs and keep it out of the
+#                           repository's language statistics.
+#
+# The rule that goes with them and cannot be expressed here: `frontend/` and
+# its build output are committed together, in the same commit. A bundle that
+# does not correspond to any source tree is worse than no bundle.
+src/clipper/webui/dist/** -diff linguist-generated=true

@@ -237,7 +237,7 @@ def _check_watchlist() -> Check:
     return Check("watchlist", "ok", f"{total} channels ({blocked} blocked)")
 
 
-def _check_disk(jobs_root: Path) -> Check:
+def _check_disk(jobs_root: Path, floor: int = DISK_FLOOR_BYTES) -> Check:
     """1440p sources are 0.5-2 GB, are never deleted, and land here."""
     probe = jobs_root if jobs_root.is_absolute() else (Path.cwd() / jobs_root)
     while not probe.exists() and probe != probe.parent:
@@ -248,12 +248,12 @@ def _check_disk(jobs_root: Path) -> Check:
         return Check("free disk", "warn", f"could not measure {probe}: {exc}")
 
     where = probe.anchor or str(probe)
-    if usage.free < DISK_FLOOR_BYTES:
+    if usage.free < floor:
         return Check(
             "free disk",
             "warn",
             f"{human_bytes(usage.free)} free on {where} - under the "
-            f"{human_bytes(DISK_FLOOR_BYTES)} a job should not start below",
+            f"{human_bytes(floor)} a job should not start below",
             hint="delete a finished job's source.mp4; it is ~95% of a job's bytes",
         )
     return Check("free disk", "ok", f"{human_bytes(usage.free)} free on {where}")
@@ -283,6 +283,34 @@ def _check_jobs_root(jobs_root: Path) -> Check:
 # --------------------------------------------------------------------------
 
 
+def _check_operations(jobs_root: Path) -> list[Check]:
+    from clipper import webui
+    from clipper.server.operations import RunnerClaim
+
+    checks = [
+        Check(
+            "web UI bundle",
+            "ok" if webui.is_built() else "warn",
+            str(webui.DIST),
+            hint=None if webui.is_built() else "run npm run build in frontend/",
+        )
+    ]
+    claim = RunnerClaim(jobs_root)
+    if not claim.path.exists():
+        checks.append(Check("queue owner", "ok", "No server holds the queue."))
+    else:
+        try:
+            claim.acquire()
+        except RuntimeError:
+            checks.append(
+                Check("queue owner", "ok", "A server holds this queue; only one can run.")
+            )
+        else:
+            claim.release()
+            checks.append(Check("queue owner", "ok", "No server holds the queue."))
+    return checks
+
+
 def run_checks(settings: config_module.Settings, *, jobs_root: Path, cwd: Path) -> list[Check]:
     """Every check, given an already-loaded ``settings``.
 
@@ -298,7 +326,8 @@ def run_checks(settings: config_module.Settings, *, jobs_root: Path, cwd: Path) 
         _check_face_tracking(settings),
         _check_watchlist(),
         _check_jobs_root(jobs_root),
-        _check_disk(jobs_root),
+        _check_disk(jobs_root, int(float(settings.get("server.min_free_gb", 10)) * 1024**3)),
+        *_check_operations(jobs_root),
     ]
 
 

@@ -185,6 +185,64 @@ def stage_json(name: str, stage: Any) -> dict[str, Any]:
     }
 
 
+def run_options_json(options: Any) -> dict[str, Any]:
+    """The flags a queue entry was submitted with (``queue.RunOptions``)."""
+    return {
+        "rights": options.rights,
+        "music": options.music,
+        "no_music": options.no_music,
+        "centre_crop": options.centre_crop,
+        "force": options.force,
+        "render_only": options.render_only,
+        "approved_only": options.approved_only,
+        "clip_index": options.clip_index,
+        "allow_red": options.allow_red,
+        "override_reason": options.override_reason,
+    }
+
+
+def queue_entry_json(entry: Any) -> dict[str, Any]:
+    """One :class:`~clipper.server.queue.QueueEntry`.
+
+    ``label`` is emitted because the row has to say *something* for the minutes
+    between pasting a URL and ``ingest`` producing a title, and the fallback
+    ("show the URL") is a display decision that belongs on this side of the
+    wire rather than being reimplemented in TypeScript.
+
+    ``pid`` is included deliberately: when a render has been silent for two
+    minutes, "process 24180 is alive" is the one thing that distinguishes
+    working from hung, and it is what you type into Task Manager if it is not.
+    """
+    return {
+        "entry_id": entry.entry_id,
+        "source": entry.source,
+        "status": str(entry.status),
+        "label": entry.label,
+        "options": run_options_json(entry.options),
+        "video_id": entry.video_id,
+        "rights_status": entry.rights_status,
+        "pid": entry.pid,
+        "submitted_at": iso(entry.submitted_at),
+        "started_at": iso(entry.started_at),
+        "finished_at": iso(entry.finished_at),
+        "last_alive": iso(entry.last_alive),
+        "error": clean_error(entry.error),
+        "exit_code": entry.exit_code,
+    }
+
+
+def event_json(event: Any) -> dict[str, Any]:
+    """One :class:`~clipper.server.events.Event`.
+
+    The event already knows its own wire form - it is written to JSONL in
+    exactly this shape - so this delegates rather than restating it. Keeping
+    the function here anyway means every route still serialises through
+    ``schemas``, and the day the stored shape and the wire shape need to differ
+    there is already a seam.
+    """
+    return event.to_json()
+
+
 def check_json(check: Any) -> dict[str, Any]:
     """One :class:`~clipper.server.doctor.Check`."""
     return {
@@ -200,10 +258,13 @@ __all__ = [
     "check_json",
     "clip_card_json",
     "counts_json",
+    "event_json",
     "iso",
     "job_summary_json",
     "job_view_json",
     "media_url",
     "preview_json",
+    "queue_entry_json",
+    "run_options_json",
     "stage_json",
 ]

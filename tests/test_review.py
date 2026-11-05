@@ -321,3 +321,81 @@ def test_apply_review_rejects_an_unknown_clip(store):
 )
 def test_timecode(seconds, expected):
     assert presenter.timecode(seconds) == expected
+
+
+# -- the single-writer discipline (WEB_UI_PLAN.md section 3) -----------------
+
+
+def _claim(store, video_id: str) -> str:
+    """Put ``video_id`` in the queue as the job a worker is currently writing."""
+    from clipper.server.queue import QueueStore
+
+    queue = QueueStore(store.root)
+    entry = queue.enqueue("https://youtu.be/vid123")
+    queue.update(entry.entry_id, status="running", video_id=video_id, pid=4242)
+    return entry.entry_id
+
+
+def test_a_verdict_on_a_running_job_is_refused_with_409(client, store):
+    """And - the assertion that matters - the state file is byte-identical.
+
+    ``apply_review`` is load-mutate-save and the worker holds the same
+    ``JobState`` for the whole of a multi-minute stage, so a verdict written
+    now is one the next ``store.save`` silently discards, or one that discards
+    the stage's work. There is no lock, and section 3 explains why a lock would
+    not have helped: the read-modify-write window *is* the whole stage.
+    """
+    _claim(store, "vid123")
+    path = store.job_dir("vid123") / "state.json"
+    before = path.read_bytes()
+
+    response = client.post("/jobs/vid123/clips/clip_01/review", json={"approved": True})
+
+    assert response.status_code == 409
+    assert response.get_json()["writable"] is False
+    assert path.read_bytes() == before
+
+
+def test_the_409_names_the_job_so_the_page_can_explain_itself(client, store):
+    _claim(store, "vid123")
+
+    body = client.post("/jobs/vid123/clips/clip_01/review", json={"approved": True}).get_json()
+
+    assert body["job_id"] == "vid123"
+    assert body["clip_id"] == "clip_01"
+    assert "verdicts are refused" in body["error"]
+
+
+def test_a_form_post_is_refused_the_same_way(client, store):
+    """The Jinja page posts a form, and a 302 back to an unchanged page would
+    read as "it worked"."""
+    _claim(store, "vid123")
+
+    response = client.post("/jobs/vid123/clips/clip_01/review", data={"verdict": "approve"})
+
+    assert response.status_code == 409
+
+
+def test_a_verdict_on_a_job_nobody_owns_still_lands(client, store):
+    """The 409 is the backstop for a stale tab, not the normal path.
+
+    Every job payload carries ``writable``, so the SPA greys the buttons
+    instead of letting you discover this as an error.
+    """
+    _claim(store, "some-other-job")
+
+    response = client.post("/jobs/vid123/clips/clip_01/review", json={"approved": True})
+
+    assert response.status_code == 200
+    assert store.load("vid123").clip("clip_01").approved is True
+
+
+def test_a_finished_entry_does_not_hold_the_file(client, store):
+    from clipper.server.queue import QueueStore
+
+    entry_id = _claim(store, "vid123")
+    QueueStore(store.root).update(entry_id, status="done")
+
+    response = client.post("/jobs/vid123/clips/clip_01/review", json={"approved": True})
+
+    assert response.status_code == 200

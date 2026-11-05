@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <!-- No favicon link: the bundle is committed into the Python package and
+         every byte of it shows up in a diff, so an unused icon file is not
+         worth carrying. The browser's 404 for /favicon.ico is answered by the
+         SPA catch-all and costs nothing. -->
+    <meta
+      name="description"
+      content="Create, review, and download short clips from your videos in one clear workspace."
+    />
+    <title>Clipper - Your Shorts Studio</title>
+    <script>
+      ;(() => {
+        let theme = "system"
+        try {
+          theme = localStorage.getItem("theme") || "system"
+        } catch {}
+        const dark =
+          theme === "dark" ||
+          (theme !== "light" &&
+            matchMedia("(prefers-color-scheme: dark)").matches)
+        document.documentElement.classList.add(dark ? "dark" : "light")
+      })()
+    </script>
+    <script type="module" crossorigin src="/assets/index.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

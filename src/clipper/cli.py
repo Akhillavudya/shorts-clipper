@@ -6,6 +6,7 @@
     clipper moments <job_id>
     clipper render <job_id> --clip 1
     clipper review <job_id>
+    clipper ui
     clipper run <url> --auto
     clipper publish <job_id> --clip 1
     clipper upload <job_id> --clip 1
@@ -24,7 +25,9 @@ clip is rendered or a Short is live. ``calibrate`` reads across every job at
 once because the sample is the point. ``review`` is outside them too - it runs
 a local web server and edits state rather than producing any. ``auth`` is not a
 stage at all: it is the one-time browser step that mints the OAuth refresh
-token ``upload`` and ``calibrate`` both run on.
+token ``upload`` and ``calibrate`` both run on. ``ui`` is ``review`` plus a
+submit box and a running queue: it serves the SPA and the supervisor that
+drains ``jobs/_queue``, which is the whole point of WEB_UI_PLAN.md.
 """
 
 from __future__ import annotations
@@ -476,6 +479,13 @@ def review(
         bool,
         typer.Option("--browser/--no-browser", help="Open the page automatically."),
     ] = True,
+    run_queue: Annotated[
+        bool,
+        typer.Option(
+            "--run-queue",
+            help="Also drain jobs/_queue: start the supervisor that runs queued jobs.",
+        ),
+    ] = False,
     jobs_root: JobsRoot = None,
     config: ConfigPath = Path("config/settings.yaml"),
 ) -> None:
@@ -488,6 +498,13 @@ def review(
     Binds to localhost by default on purpose. The page streams media straight
     out of the jobs root, so a bind address other than loopback publishes every
     source video on this machine to whoever can reach it.
+
+    ``--run-queue`` additionally starts the job supervisor, so entries posted
+    to ``/api/queue`` actually run. It is off by default because this command
+    is the read-mostly one: the review page writes verdicts and nothing else,
+    and a page that could start a two-gigabyte download by being visited is a
+    different risk. It is a bridge - ``clipper ui`` (WEB_UI_PLAN.md phase 3)
+    is where a running queue belongs, once there is a submit box to drive it.
     """
     import threading
     import webbrowser
@@ -508,6 +525,11 @@ def review(
             f"  [yellow]bound to {host}: every video under {ctx.jobs_root} is "
             f"readable from that address.[/yellow]"
         )
+    if run_queue:
+        console.print(
+            f"  [dim]queue:[/dim] draining {ctx.jobs_root / '_queue'} "
+            f"[dim]- one job at a time[/dim]"
+        )
     console.print("  [dim]ctrl-c to stop[/dim]")
 
     # Imported here, not at module scope: Flask is only needed by this one
@@ -520,7 +542,116 @@ def review(
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 
     try:
-        serve(host=host, port=port, store=ctx.store)
+        serve(host=host, port=port, store=ctx.store, run_queue=run_queue, config_path=config)
+    except KeyboardInterrupt:  # pragma: no cover - ctrl-c is not a traceback
+        console.print("  [dim]stopped[/dim]")
+
+
+@app.command()
+def ui(
+    port: Annotated[int, typer.Option("--port", "-p", help="Port to listen on.")] = 5151,
+    host: Annotated[
+        str,
+        typer.Option("--host", help="Interface to bind. Anything but localhost exposes media."),
+    ] = "127.0.0.1",
+    open_browser: Annotated[
+        bool,
+        typer.Option("--browser/--no-browser", help="Open the page automatically."),
+    ] = True,
+    run_queue: Annotated[
+        bool,
+        typer.Option(
+            "--run-queue/--no-run-queue",
+            help="Drain jobs/_queue. On by default - it is what makes a submitted job run.",
+        ),
+    ] = True,
+    allow_remote: Annotated[
+        bool,
+        typer.Option(
+            "--allow-remote", help="Acknowledge exposing files and controls to the network."
+        ),
+    ] = False,
+    jobs_root: JobsRoot = None,
+    config: ConfigPath = Path("config/settings.yaml"),
+) -> None:
+    """Serve the web UI: paste a link, walk away, come back to finished Shorts.
+
+    The one command this project is meant to be used through. It serves the
+    React bundle committed inside the package, so it needs Python and nothing
+    else - Node is only required to *change* the frontend.
+
+    Unlike ``clipper review`` it attaches the job supervisor, and that is the
+    whole difference between the two: this page has a submit box, so the queue
+    behind it has to actually drain. One job runs at a time, in the order you
+    paste them, and the queue survives a restart - closing the tab, or this
+    terminal, does not lose what is queued.
+
+    Nothing here uploads anything. Automation stops after ``render`` by
+    design (hard rule 10): clips come out rendered and downloadable, and
+    ``clipper upload`` stays a deliberate, separate, one-clip-at-a-time step.
+
+    Binds to loopback for the same reason ``review`` does - the media route
+    streams straight out of the jobs root.
+    """
+    import threading
+    import webbrowser
+
+    from clipper import webui
+    from clipper.review.app import _is_loopback
+
+    if not _is_loopback(host) and not allow_remote:
+        raise typer.BadParameter("Non-loopback binding requires --allow-remote.")
+    ctx = _context(config, jobs_root)
+
+    url = f"http://{'localhost' if host in {'0.0.0.0', '127.0.0.1'} else host}:{port}/"
+
+    console.print(f"[bold]clipper ui[/bold]  {url}")
+    console.print(f"  [dim]jobs root:[/dim] {ctx.jobs_root}")
+
+    if not webui.is_built():
+        # A warning, not an exit. The API, the media route and the Jinja pages
+        # under /legacy/ all still work without a bundle, and the page the
+        # catch-all serves says exactly which two commands build one.
+        console.print(
+            f"  [yellow]no built UI at {webui.DIST}: the page will tell you to run "
+            f"`cd frontend && npm install && npm run build`.[/yellow]"
+        )
+
+    if run_queue:
+        console.print(
+            f"  [dim]queue:[/dim] draining {ctx.jobs_root / '_queue'} "
+            f"[dim]- one job at a time[/dim]"
+        )
+    else:
+        console.print(
+            "  [yellow]--no-run-queue: submissions will be recorded and never run.[/yellow]"
+        )
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        console.print(
+            f"  [yellow]bound to {host}: every video under {ctx.jobs_root} is "
+            f"readable from that address.[/yellow]"
+        )
+    console.print(f"  [dim]review pages:[/dim] {url}legacy/")
+    console.print("  [dim]ctrl-c to stop[/dim]")
+
+    from clipper.review import serve
+
+    if open_browser:
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+
+    try:
+        serve(
+            host=host,
+            port=port,
+            store=ctx.store,
+            run_queue=run_queue,
+            config_path=config,
+            ui="spa",
+            allow_remote=allow_remote,
+        )
+    except (RuntimeError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
     except KeyboardInterrupt:  # pragma: no cover - ctrl-c is not a traceback
         console.print("  [dim]stopped[/dim]")
 

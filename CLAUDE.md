@@ -15,10 +15,30 @@ framework, and none is wanted.
 ```bash
 uv sync                          # create/refresh .venv from pyproject.toml
 uv run clipper --help            # the CLI
+uv run clipper ui                # the web UI - the daily driver
 uv run python -m pytest          # tests (no network, no API keys needed)
 uv run ruff check . --fix        # lint
 uv run ruff format .             # format
 ```
+
+The frontend, only when you are changing it:
+
+```bash
+cd frontend
+npm install
+npm run build     # -> src/clipper/webui/dist/, which IS committed
+npm run dev       # :5173, proxying /api /media /healthz to :5151
+npx tsc --noEmit && npx eslint .
+```
+
+Node is needed to *change* the frontend and never to run it: `clipper ui`
+serves the committed bundle, so `uv sync` is the whole install. **Rebuild and
+commit `dist/` in the same commit as the sources that produced it** - a bundle
+that corresponds to no source tree is worse than no bundle. `tests/test_webui.py`
+fails if `dist/index.html` is missing, which is the tripwire for forgetting.
+
+Dev mode is two terminals: `uv run clipper ui --no-browser` and `npm run dev`.
+Same origin through Vite's proxy, which is why there is no CORS code anywhere.
 
 **`uv run pytest` does not work on this machine** - it fails with
 `uv trampoline failed to canonicalize script path`, or hangs after a
@@ -224,27 +244,126 @@ for `amber` entries goes in `src/clipper/rights/permissions/`.
 
 **Every phase of the CLI build order is implemented.** `ingest -> transcribe ->
 moments -> render` runs end to end from the CLI, and so do `discover`,
-`review`, `publish`, `upload` and `calibrate`. 692 tests, none of which touch a
-network or need ffmpeg.
+`review`, `publish`, `upload` and `calibrate`. 934 tests, none of which touch a
+network, spawn a process or need ffmpeg.
 
 Implemented and tested: `state.py`, `llm/`, `media.py`, `config.py`,
 `prompts.py`, `pipeline.py`, `google_auth.py`, `ingest/`, `transcribe/`,
 `moments/`, `edit/`, `discover/`, `review/`, `publish/`, `calibrate/`,
-`rights/registry.py`, `server/` (phase 0 only - see below), and the CLI
-(`discover`, `ingest`, `transcribe`, `moments`, `render`, `run`, `review`,
-`publish`, `upload`, `auth`, `calibrate`, plus `status` and `doctor`).
+`rights/registry.py`, `server/`, `webui/` (phases 0-6 - see below), and
+the CLI (`discover`, `ingest`, `transcribe`, `moments`, `render`, `run`,
+`review`, `ui`, `publish`, `upload`, `auth`, `calibrate`, plus `status` and
+`doctor`).
 
 **The web UI is in progress.** `WEB_UI_PLAN.md` is its design document and
-delivery order; phase 0 of that plan is done and committed. What exists:
+delivery order; phases 0 through 6 of that plan are implemented. What exists:
 `src/clipper/server/` with the `/api` blueprint (`GET /api/jobs`,
-`/api/jobs/<id>`, `/api/doctor`), the hand-written serializers in
-`schemas.py`, the preflight checks as data in `doctor.py`, and ANSI
-stripping in `text.py`. `clipper review` serves it alongside the Jinja
-pages; `create_app(api=False)` turns it off. Phases 1-8 - the durable
-queue, the job runner and its worker subprocess, the React SPA, the rights
-panel and the retirement of the Jinja UI - are not built.
+`/api/jobs/<id>`, `/api/doctor`, `POST`/`GET`/`DELETE /api/queue` and
+`POST /api/queue/<entry>/cancel|retry`), the hand-written serializers in
+`schemas.py`, the preflight checks as data in `doctor.py`, ANSI stripping in
+`text.py`, the durable queue in `queue.py`, the progress event log in
+`events.py`, the worker child in `worker.py` and the supervisor in `runner.py`.
+`clipper review` serves the API alongside the Jinja pages;
+`create_app(api=False)` turns it off. Phase 4 adds `/jobs` and `/jobs/:id`
+in React, lazy video previews, rubric bars, keep/cut/undo with review notes,
+the existing keyboard bindings, and individual MP4 / streamed ZIP downloads.
+The API review route refuses writes while a worker owns the job; downloads
+also wait for that worker to finish. ZIP files stream in 64 KiB blocks using
+ZIP_STORED, without buffering full videos or making a temporary archive.
+Phases 7-8 (optional download progress and Jinja retirement) remain unfinished.
 
-Two rules the server layer keeps, both load-bearing and both with tests:
+Phase 4 verification: **890 tests pass**, including 19 new review/download
+cases, and Ruff lint/format plus the frontend production build and ESLint pass.
+Browser interaction/visual verification remains manual: no browser was available
+in the implementation session. Run `uv run clipper ui`, open Jobs, review a clip,
+check keyboard navigation and source-span playback, and download MP4/ZIP.
+
+Phase 5 adds rights classification with required reasons, remembered channels
+via comment-preserving `rights/watchlist_edit.py`, and render-only controls for
+kept/all/individual clips. Green/amber classification requeues a blocked job;
+red/unknown remain blocked. Render anyway requires confirmation and a reason,
+which is persisted and displayed separately from the original rights note.
+Remembering an existing channel is refused; edit that entry directly instead.
+
+Retry checks all active entries before resetting job AND clip stages. A normal
+retry clears any previous force flag, and the worker reuses completed ingest
+without resolving/downloading the source again. API mutations and runner tick
+share a short in-process RLock on their shared QueueStore, preventing worker
+startup during these writes. It never spans pipeline work and is not a
+cross-process job lock. The older no-lock descriptions below refer to file
+ownership between the server and worker, not concurrent server requests.
+
+Phase 5 verification: **921 tests pass**, Ruff lint/format and frontend
+build/ESLint pass. No browser connection was available; live browser and real
+video verification remain manual. Real jobs and the watchlist were not changed.
+
+**`clipper ui` is the command this project is meant to be used through.** It
+serves the React bundle at `/`, attaches the supervisor (so the queue actually
+drains), and keeps the Jinja review pages mounted at `/legacy/`. `clipper
+review` is unchanged: Jinja at `/`, no supervisor unless `--run-queue`. The
+switch is `create_app(ui="spa"|"jinja")`, and it exists because two review UIs
+writing `approved` is the second-writer problem of plan section 3 with a human
+on each end. Phase 8 deletes the Jinja half and the parameter with it.
+
+Without a supervisor nothing drains the queue: `GET /api/queue` reports
+`runner.alive: false` and the page says so rather than looking idle, and the
+`cancel` and `retry` routes answer `503` rather than accepting a request they
+cannot honour. Phase 6 now holds an OS file lock at `jobs/_queue/runner.lock` for
+the serving lifetime. A second queue server refuses startup even on another port.
+The HTTP port is bound before workers start. Non-loopback `clipper ui` requires
+`--allow-remote`. Logs rotate at `jobs/_queue/logs/server.log`; job pages link raw
+worker tails. `/settings` shows doctor checks, read-only configuration and per-job
+storage. Source deletion refuses active jobs, preserves local originals and clip
+data, and marks ingest pending for retry. `server.min_free_gb` controls preflight.
+
+Phase 6 validation: 934 passing Python tests, Ruff checks, frontend production
+build and ESLint. Browser interaction and real mid-render process-tree shutdown
+remain manual verification tasks. Existing real jobs and watchlist were not edited.
+
+Five things about the runner and the worker:
+
+- **Exit codes are the contract.** `0` done · `1` failed · `3` blocked by
+  rights · `130` cancelled. `3` is reserved so a rights block is never coloured
+  as a generic failure, and it matches `clipper run`'s own exit code for
+  `RightsBlocked`.
+- **The worker drives the four stages itself rather than calling `run_all`.**
+  It has to: the cancel checkpoint and the rights gate both live *between*
+  stages. `pipeline.py` is untouched, and that is the rule - the worker passes
+  `EventLog.progress_callback` straight into each stage as `on_progress`,
+  because it is already exactly the `Callable[[str, str], None]` the pipeline
+  expects.
+- **The rights gate fires between `ingest` and `transcribe`.** A source that is
+  not exportable stops there with status `blocked`, having spent no LLM quota
+  and no CPU. That cheap failure - a minute after pasting rather than forty
+  minutes later at `render` - is the point of plan section 5.
+- **Cancel is graceful, then not.** The supervisor writes
+  `jobs/_queue/<entry_id>.cancel`; the worker exits `130` at the next stage
+  boundary; ten seconds later the *tree* is killed. `taskkill /T /F`, not
+  `terminate()` - terminating only the Python child orphans ffmpeg and yt-dlp,
+  which keep a handle on `source.mp4`. Verified by hand against a real
+  grandchild process on this machine.
+- **`is_alive` must never use `os.kill(pid, 0)` on Windows.** CPython
+  implements `os.kill` there as `TerminateProcess(handle, sig)` for any signal
+  but the two console events, so the liveness probe would kill what it asked
+  about. `runner.is_alive` uses `OpenProcess` + `GetExitCodeProcess`.
+
+Two consequences of the file layout worth holding on to:
+
+- `jobs/_queue/` is not a job. `queue.json` is written only by the Flask
+  process; `events/<entry_id>.jsonl` only by the worker child; `state.json`
+  only by the worker while it runs. No file has two writers, which is why there
+  is no lock anywhere in `server/`. `JobStore.list_jobs()` skips the directory
+  for free - it has no `state.json`.
+- The single-writer discipline (plan section 3) is now closed at both ends:
+  `GET /api/jobs/<id>` reports `writable: false` when the queue says a worker
+  owns that job, **and the review POST returns `409` with the state file
+  untouched** when it is asked to write one anyway. There is a test that reads
+  the file's bytes before and after and asserts they are identical. The one
+  deliberate exception is `POST /api/queue/<entry>/retry` with `from_stage`,
+  which resets stages to `pending` from the server process - legal only because
+  `retry` has just refused a queued or running entry.
+
+Three rules the server layer keeps, all load-bearing and all with tests:
 
 - **`server/__init__` re-exports only the Flask-free half.** `cli.py` imports
   `server.doctor`, and `clipper moments` must not pay to import a web
@@ -252,6 +371,13 @@ Two rules the server layer keeps, both load-bearing and both with tests:
 - **`create_app` imports the blueprint lazily.** `server/api.py` reads
   `review/presenter.py`, so a top-level import would close the loop
   `review -> server.api -> review`.
+- **The queue and the event log are built on first use, not at startup.**
+  `create_app` does not set `JOB_QUEUE` or `EVENT_LOG` unless it is handed a
+  runner; the blueprint builds them from the store's root when a queue route is
+  first hit, so serving the review pages on a machine that has never queued
+  anything does not create `jobs/_queue/`. `create_app(runner=...)` takes both
+  off the runner instead, so the API and the supervisor share one queue object
+  rather than two instances describing one file.
 
 `server/doctor.py` is the one source of truth for the preflight checks:
 `clipper doctor` renders the list and `GET /api/doctor` serializes it.

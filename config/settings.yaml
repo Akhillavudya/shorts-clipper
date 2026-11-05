@@ -4,6 +4,10 @@
 # tier ("recall" or "rerank") and this file decides what that means. Swapping
 # provider is a config change, not a code change.
 
+server:
+  # Refuse to start a worker below this amount of free disk space.
+  min_free_gb: 10
+
 paths:
   jobs_root: jobs
   assets_root: assets

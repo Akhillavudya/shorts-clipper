@@ -27,10 +27,11 @@ be closed halfway; ``clipper render <job>`` already skips rejected clips, and
 
 from __future__ import annotations
 
+import atexit
 import ipaddress
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from flask import (
     Flask,
@@ -76,6 +77,8 @@ def create_app(
     jobs_root: Path | str | None = None,
     weights: dict[str, Any] | None = None,
     api: bool = True,
+    runner: Any = None,
+    ui: Literal["jinja", "spa"] = "jinja",
 ) -> Flask:
     """Build the app. ``store`` wins over ``jobs_root``; tests pass a temp one.
 
@@ -83,6 +86,30 @@ def create_app(
     the Jinja pages. It is on by default and additive: the pages, the media
     route and their tests are untouched by it. The switch exists so a test can
     assert the Jinja UI stands up on its own.
+
+    ``runner`` attaches a :class:`~clipper.server.runner.JobRunner`, which is
+    what turns a durable queue into a queue that drains. It is ``None`` by
+    default and stays ``None`` under ``clipper review``: that command is
+    read-mostly, and a page that could start a two-gigabyte download by being
+    visited is a different thing from a page that shows you clips. When one is
+    attached, its queue and event log become the app's, so the API and the
+    supervisor read and write one object rather than two views of one file.
+
+    ``ui`` decides who owns ``/`` (WEB_UI_PLAN.md section 6). Two UIs cannot
+    both have it, and leaving both at the root is not something to resolve
+    later: two review pages writing ``approved`` is precisely the second-writer
+    problem of section 3, with a human on each end.
+
+    * ``"jinja"`` - what ``clipper review`` serves, and the default: the
+      templates at ``/`` and ``/jobs/<id>``, exactly as they have always been.
+      Nothing SPA-shaped is mounted, so a checkout whose bundle was never built
+      behaves identically.
+    * ``"spa"`` - what ``clipper ui`` serves: the React bundle at ``/``, and
+      the Jinja pages moved wholesale to ``/legacy/``. Their endpoint *names*
+      do not move, so ``url_for("job", ...)`` keeps working and the review POST
+      still redirects to the page it was submitted from.
+
+    Phase 8 deletes the Jinja half and this parameter with it.
     """
     # Imported here rather than at module scope, and it has to be: ``server/
     # api.py`` reads this package's ``presenter``, so a top-level import would
@@ -90,6 +117,7 @@ def create_app(
     # time breaks the cycle under every import order instead of relying on
     # ``from package import submodule`` resolving a half-built module.
     from clipper.server.api import create_blueprint, job_dir_or_404
+    from clipper.server.queue import QueueStore
 
     if store is None:
         store = JobStore(jobs_root if jobs_root is not None else DEFAULT_JOBS_ROOT)
@@ -101,8 +129,37 @@ def create_app(
     # process is expected to be writing. A cached page is a wrong page.
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
+    # Two more keys the API reads: ``JOB_QUEUE`` and ``EVENT_LOG``. Without a
+    # runner they are not set on purpose - ``server/api.py`` builds them from
+    # the store's root the first time a queue route is hit, so merely starting
+    # the review pages never creates ``jobs/_queue/``. With a runner they come
+    # from it, so the API and the supervisor share one queue object rather than
+    # two instances racing to describe one file.
+    app.config["JOB_RUNNER"] = runner
+    if runner is not None:
+        app.config["JOB_QUEUE"] = runner.queue
+        app.config["EVENT_LOG"] = runner.events
+
     def _store() -> JobStore:
         return app.config["JOB_STORE"]
+
+    def _running_video_id() -> str | None:
+        """Which job, if any, currently has a worker writing its ``state.json``.
+
+        Section 3 of WEB_UI_PLAN.md, in one function. The queue is the
+        authority on what is running, so asking it is how this page learns that
+        it must not write - there is no lock, and a lock would not have worked
+        anyway, because the read-modify-write window *is* the whole stage.
+
+        Built here rather than at startup, and building it touches no disk: a
+        ``QueueStore`` over a directory that does not exist reads as an empty
+        queue, so a machine that has never queued anything still never grows a
+        ``jobs/_queue/``.
+        """
+        queue = app.config.get("JOB_QUEUE")
+        if queue is None:
+            queue = QueueStore(_store().root)
+        return queue.running_video_id()
 
     def _job_dir(job_id: str) -> Path:
         """Resolve a job directory, refusing anything outside the jobs root.
@@ -115,12 +172,18 @@ def create_app(
 
     # -- pages ----------------------------------------------------------
 
-    @app.get("/")
+    # Under ``ui="spa"`` these three move to ``/legacy/``. Only the URLs move:
+    # the endpoint names, the view functions and every test that drives them
+    # through ``url_for`` are untouched, which is what makes the switch a
+    # one-line change rather than a rewrite of ``tests/test_review.py``.
+    pages = "/legacy" if ui == "spa" else ""
+
+    @app.get(f"{pages}/")
     def index() -> str:
         jobs = presenter.build_index(_store())
         return render_template("index.html", jobs=jobs, jobs_root=_store().root)
 
-    @app.get("/jobs/<job_id>")
+    @app.get(f"{pages}/jobs/<job_id>")
     def job(job_id: str) -> str:
         _job_dir(job_id)
         view = presenter.build_job(_store(), job_id, weights=app.config["SCORING_WEIGHTS"])
@@ -128,9 +191,38 @@ def create_app(
 
     # -- the one write ---------------------------------------------------
 
-    @app.post("/jobs/<job_id>/clips/<clip_id>/review")
+    @app.post(f"{pages}/jobs/<job_id>/clips/<clip_id>/review")
     def review(job_id: str, clip_id: str):
         _job_dir(job_id)
+
+        # The single-writer discipline, enforced at the boundary that can see
+        # it. ``presenter.apply_review`` is load-mutate-save, and the worker
+        # holds the same ``JobState`` object for the whole of a multi-minute
+        # stage, so a verdict written now is a verdict the next ``store.save``
+        # silently discards - or worse, one that discards the stage's work.
+        #
+        # Refusing rather than deferring: a pending-verdict sidecar applied
+        # later is a second source of truth for ``approved``, which recreates
+        # the merge problem it was meant to avoid and makes "what did I
+        # decide?" ambiguous. The UI normally never sees this - every job
+        # payload carries ``writable`` and the buttons grey themselves - so
+        # this is the backstop for a stale tab.
+        if _running_video_id() == job_id:
+            return (
+                jsonify(
+                    {
+                        "error": (
+                            f"{job_id} is being written by its worker right now, so "
+                            f"verdicts are refused until it finishes. Nothing was changed."
+                        ),
+                        "job_id": job_id,
+                        "clip_id": clip_id,
+                        "writable": False,
+                    }
+                ),
+                409,
+            )
+
         payload = request.get_json(silent=True) or {}
         wants_json = bool(payload) or request.accept_mimetypes.best == "application/json"
 
@@ -205,18 +297,32 @@ def create_app(
 
     # -- the JSON API ----------------------------------------------------
 
-    # Registered after the pages and before the error handlers. Ordering is
-    # not load-bearing yet - no route below collides with ``/api/`` - but it
-    # will be once the SPA catch-all arrives, and that one must be last.
+    # Registered after the pages and before the SPA. The ordering *is*
+    # load-bearing now: ``webui.register`` adds a ``/<path:relpath>``
+    # catch-all, and a catch-all registered first would match ``/api/jobs``
+    # before the blueprint ever saw it.
     if api:
         app.register_blueprint(create_blueprint())
+
+    # -- the SPA, last ---------------------------------------------------
+
+    if ui == "spa":
+        # Imported here for the reason everything in this file is: a module
+        # that only serves Jinja should not import the package that holds a
+        # 300 kB bundle path and a Flask static handler.
+        from clipper import webui
+
+        webui.register(app)
 
     # -- errors ----------------------------------------------------------
 
     @app.errorhandler(404)
     def not_found(exc):
         message = getattr(exc, "description", "not found")
-        if request.path.startswith(("/media/", "/api/")):
+        # Every machine-readable prefix answers 404 in JSON. Handing the SPA's
+        # ``fetch()`` an HTML page turns a mistyped route into "Unexpected
+        # token '<'", which is three steps removed from the actual mistake.
+        if request.path.startswith(("/media/", "/api/", "/healthz")):
             return jsonify({"error": message}), 404
         return render_template("error.html", code=404, message=message), 404
 
@@ -235,6 +341,31 @@ def _is_loopback(host: str) -> bool:
         return host in {"localhost", ""}
 
 
+def build_runner(store: JobStore, *, config_path: Path | str = "config/settings.yaml"):
+    """A supervisor over this store's jobs root, not yet started.
+
+    Lives here rather than in ``runner.py`` so that the queue, the event log
+    and the app are wired together in exactly one place. Imported lazily for
+    the reason the whole ``server`` package is careful about imports:
+    ``clipper moments`` should not pay for a web framework, and nothing that
+    only serves pages should pay for the supervisor.
+    """
+    from clipper.config import Settings
+    from clipper.server.events import EventLog
+    from clipper.server.queue import QueueStore
+    from clipper.server.runner import JobRunner
+
+    return JobRunner(
+        queue=QueueStore(store.root),
+        events=EventLog(store.root),
+        repo_root=Path.cwd(),
+        config_path=Path(config_path).resolve(),
+        min_free_bytes=int(
+            float(Settings.load(config_path).get("server.min_free_gb", 10)) * 1024**3
+        ),
+    )
+
+
 def serve(
     *,
     host: str = "127.0.0.1",
@@ -242,14 +373,45 @@ def serve(
     jobs_root: Path | str | None = None,
     store: JobStore | None = None,
     debug: bool = False,
+    run_queue: bool = False,
+    config_path: Path | str = "config/settings.yaml",
+    ui: Literal["jinja", "spa"] = "jinja",
+    allow_remote: bool = False,
 ) -> None:
-    """Run the development server. Called by ``clipper review``.
+    """Run the development server. Called by ``clipper review`` and ``clipper ui``.
 
     Werkzeug's server is the right one here: single user, single machine, and
     it reloads nothing the pipeline depends on. Anything more is a deployment,
     and this is not deployed.
+
+    ``run_queue`` attaches and starts the supervisor, which is what makes the
+    queue drain. It is off by default and ``clipper review`` leaves it off:
+    this command is the read-mostly one. ``clipper ui`` turns it on, because a
+    submit box in front of a queue nothing drains is a button that does
+    nothing.
+
+    ``ui`` chooses which frontend owns ``/`` - see :func:`create_app`.
+
+    The reloader is disabled, and that is not a detail. Werkzeug's reloader
+    restarts the process on any source change, and restarting the process
+    mid-render orphans a worker that is twenty minutes into an encode.
     """
-    app = create_app(store=store, jobs_root=jobs_root)
+    from werkzeug.serving import make_server
+
+    from clipper.server.logging import configure
+    from clipper.server.operations import RunnerClaim
+
+    if ui == "spa" and not _is_loopback(host) and not allow_remote:
+        raise ValueError(
+            "Non-loopback binding requires --allow-remote (exposes files and controls)."
+        )
+    runner = None
+    if run_queue:
+        resolved = store if store is not None else JobStore(jobs_root or DEFAULT_JOBS_ROOT)
+        runner = build_runner(resolved, config_path=config_path)
+
+    app = create_app(store=store, jobs_root=jobs_root, runner=runner, ui=ui)
+    app.config["SETTINGS_PATH"] = str(config_path)
     if not _is_loopback(host):
         log.warning(
             "serving the review UI on %s: the media route reads from %s, so every "
@@ -257,7 +419,35 @@ def serve(
             host,
             app.config["JOB_STORE"].root,
         )
-    app.run(host=host, port=port, debug=debug, threaded=True)
+
+    # Bind before starting any workers. A port collision must not drain a queue.
+    try:
+        server = make_server(host, port, app, threaded=True)
+    except (OSError, SystemExit) as exc:
+        raise RuntimeError(
+            f"Cannot listen on {host}:{port}. Close the existing server or use --port."
+        ) from exc
+    claim = RunnerClaim(app.config["JOB_STORE"].root)
+    handlers = []
+    try:
+        if runner is not None:
+            claim.acquire()
+        handlers = configure("INFO", app.config["JOB_STORE"].root / "_queue" / "logs")
+        if runner is not None:
+            atexit.register(runner.shutdown)
+            runner.reclaim(stop_orphans=True)
+            runner.start()
+        log.info("server listening on %s:%s", host, port)
+        server.serve_forever()
+    finally:
+        if runner is not None:
+            runner.shutdown()
+            atexit.unregister(runner.shutdown)
+        claim.release()
+        server.server_close()
+        for handler in handlers:
+            logging.getLogger("clipper").removeHandler(handler)
+            handler.close()
 
 
-__all__ = ["VERDICTS", "create_app", "serve"]
+__all__ = ["VERDICTS", "build_runner", "create_app", "serve"]
